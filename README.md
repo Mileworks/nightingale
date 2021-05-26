@@ -1,50 +1,26 @@
-<img src="https://s3-gz01.didistatic.com/n9e-pub/image/n9e-logo-bg-white.png" width="200" alt="Nightingale"/>
-<br>
+<img src="https://s3-gz01.didistatic.com/n9e-pub/logo/nightingale-logo.png" width="200" alt="Nightingale"/>
 
-[中文简介](README_ZH.md)
+---
 
-Nightingale is a fork of Open-Falcon, and all the core modules have been greatly optimized. It integrates the best practices of DiDi. You can think of it as the next generation of Open-Falcon, and use directly in production environment.
+### 夜莺简介
 
-## Documentation
+夜莺是一套分布式高可用的运维监控系统，最大的特点是混合云支持，既可以支持传统物理机虚拟机的场景，也可以支持K8S容器的场景。同时，夜莺也不只是监控，还有一部分CMDB的能力、自动化运维的能力，很多公司都基于夜莺开发自己公司的运维平台。开源的这部分功能模块也是商业版本的一部分，所以可靠性有保障、会持续维护，诸君可放心使用。效果图如下：
 
-Nightingale user manual: [https://n9e.didiyun.com/](https://n9e.didiyun.com/)
+![Nightingale](https://s3-gz01.didistatic.com/n9e-pub/image/snapshot/n9e-screen.png)
 
-## Compile
+### OCE认证
 
-```bash
-mkdir -p $GOPATH/src/github.com/didi
-cd $GOPATH/src/github.com/didi
-git clone https://github.com/didi/nightingale.git
-cd nightingale
-./control build
-```
+OCE是一个认证机制和交流平台，为夜莺生产用户量身打造，我们会为OCE企业提供更好的技术支持，比如专属的技术沙龙、企业一对一的交流机会、专属的答疑群等，如果贵司已将夜莺上了生产，[快来加入吧](https://v.didi.cn/qAA1kY)
 
-## Quickstart with Docker
+### 文档资料
 
-We has offered a Docker demo for the users who want to give it a try. Before you get started, make sure you have installed **Docker** & **docker-compose** and there are some details you should know.
+- **文档手册**： [https://n9e.didiyun.com/](https://n9e.didiyun.com/) 欢迎大家一起完善
+- **视频教程**：[https://space.bilibili.com/442531657](https://space.bilibili.com/442531657) 欢迎大家关注
+- **音频答疑**：[https://www.ximalaya.com/keji/45095827/](https://www.ximalaya.com/keji/45095827/) 欢迎大家关注
+- **二次开发**：[https://xie.infoq.cn/article/30d37e98fbe52ff2a79fc04b4](https://xie.infoq.cn/article/30d37e98fbe52ff2a79fc04b4) 欢迎大家共建
 
-* We highly recommend users prepare a new VM environment to use it.
-* All the core components will be installed on your OS according to the `docker-compose.yaml`.
-* Nightingale will use the following ports, `80`, `5800`, `5810`, `5811`, `5820`, `5821`, `5830`, `5831`, `5840`, `5841`, `6379`, `2058`, `3306`.
+### 交流互助
 
-Okay. Run it! Once the docker finish its jobs, visits http://your-env-ip in your broswer. Default username and password is `root:root`.
-```bash
-$ docker-compose up -d
-```
+关注公众号 Obsuite(官方公众号) 回复 "夜莺加群"
 
-![dashboard](https://user-images.githubusercontent.com/19553554/78956965-8b9c6180-7b16-11ea-9747-6ed5e62b068d.png)
-
-## Team
-
-[ulricqin](https://github.com/ulricqin) [710leo](https://github.com/710leo) [jsers](https://github.com/jsers) [hujter](https://github.com/hujter) [n4mine](https://github.com/n4mine) [heli567](https://github.com/heli567)
-
-## Community
-
-Nightingale is developed in open. Here we set up an organization, [github.com/n9e](https://github.com/n9e), which is used to communicate and contribute. We sincerely hope more developers can use their creativity to make lots of related projects for the Nightingale ecosystem.
-
-## License
-
-<img alt="Apache-2.0 license" src="https://s3-gz01.didistatic.com/n9e-pub/image/apache.jpeg" width="128">
-
-Nightingale is available under the Apache-2.0 license. See the [LICENSE](LICENSE) file for more info.
-
+<img src="https://s3-gz01.didistatic.com/n9e-pub/image/qrcode_obsuite.jpg" width="250" alt="Nightingale"/>

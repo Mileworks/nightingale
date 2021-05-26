@@ -26,11 +26,16 @@ _test
 /log*
 /bin
 /out
+/meta
+/pub
 /build
 /dist
 /etc/*.local.yml
+/etc/plugins/*.local.yml
 /etc/log/log.test.json
 /data*
+/tarball
+/run
 
 .idea
 .index
@@ -40,13 +45,8 @@ _test
 
 /n9e-*
 
-/src/modules/index/index
-/src/modules/collector/collector
-/src/modules/transfer/transfer
-/src/modules/tsdb/tsdb
-/src/modules/monapi/monapi
-
-/web/node_modules
-/web/.cache-loader
-
-
+tmp/
+main
+Makefile
+src/modules/monapi/plugins/snmp/
+src/modules/monapi/plugins/oracle/
