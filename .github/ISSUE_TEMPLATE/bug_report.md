@@ -4,16 +4,9 @@ about: Report a bug encountered while operating Nightingale
 labels: kind/bug
 ---
 
-**What happened**:
+**夜莺版本**:
 
-**What you expected to happen**:
 
-**How to reproduce it (as minimally and precisely as possible)**:
+**问题和复现方法**:
 
-**Anything else we need to know?**:
 
-**Environment**:
-- Nightingale Version (`./n9e-rdb -v`):
-- OS Version (`uname -a`):
-- Logs (stdout/error/warning/http.request/http.response):
-- Others:

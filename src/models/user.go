@@ -2,718 +2,486 @@ package models
 
 import (
 	"fmt"
-	"log"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/toolkits/pkg/cache"
-	"github.com/toolkits/pkg/errors"
-	"github.com/toolkits/pkg/logger"
+	"github.com/pkg/errors"
 	"github.com/toolkits/pkg/slice"
 	"github.com/toolkits/pkg/str"
-	"gopkg.in/ldap.v3"
-)
+	"gorm.io/gorm"
 
-const (
-	LOGIN_T_SMS      = "sms-code"
-	LOGIN_T_EMAIL    = "email-code"
-	LOGIN_T_PWD      = "password"
-	LOGIN_T_LDAP     = "ldap"
-	LOGIN_T_RST      = "rst-code"
-	LOGIN_T_LOGIN    = "login-code"
-	LOGIN_EXPIRES_IN = 300
-)
-const (
-	USER_S_ACTIVE = iota
-	USER_S_INACTIVE
-	USER_S_LOCKED
-	USER_S_FROZEN
-	USER_S_WRITEN_OFF
-)
-const (
-	USER_T_NATIVE = iota
-	USER_T_TEMP
+	"github.com/didi/nightingale/v5/src/pkg/ldapx"
+	"github.com/didi/nightingale/v5/src/pkg/ormx"
+	"github.com/didi/nightingale/v5/src/webapi/config"
 )
 
 type User struct {
-	Id           int64     `json:"id"`
-	UUID         string    `json:"uuid" xorm:"'uuid'"`
-	Username     string    `json:"username"`
-	Password     string    `json:"-"`
-	Passwords    string    `json:"-"`
-	Dispname     string    `json:"dispname"`
-	Phone        string    `json:"phone"`
-	Email        string    `json:"email"`
-	Im           string    `json:"im"`
-	Portrait     string    `json:"portrait"`
-	Intro        string    `json:"intro"`
-	Organization string    `json:"organization"`
-	Type         int       `json:"type" xorm:"'typ'" description:"0: long-term account; 1: temporary account"`
-	Status       int       `json:"status" description:"0: active, 1: inactive, 2: locked, 3: frozen, 4: writen-off"`
-	IsRoot       int       `json:"is_root"`
-	LeaderId     int64     `json:"leader_id"`
-	LeaderName   string    `json:"leader_name"`
-	LoginErrNum  int       `json:"login_err_num"`
-	ActiveBegin  int64     `json:"active_begin" description:"for temporary account"`
-	ActiveEnd    int64     `json:"active_end" description:"for temporary account"`
-	LockedAt     int64     `json:"locked_at" description:"locked time"`
-	UpdatedAt    int64     `json:"updated_at" description:"user info change time"`
-	PwdUpdatedAt int64     `json:"pwd_updated_at" description:"password change time"`
-	PwdExpiresAt int64     `xorm:"-" json:"pwd_expires_at" description:"password expires time"`
-	LoggedAt     int64     `json:"logged_at" description:"last logged time"`
-	CreateAt     time.Time `json:"create_at" xorm:"<-"`
+	Id       int64        `json:"id" gorm:"primaryKey"`
+	Username string       `json:"username"`
+	Nickname string       `json:"nickname"`
+	Password string       `json:"-"`
+	Phone    string       `json:"phone"`
+	Email    string       `json:"email"`
+	Portrait string       `json:"portrait"`
+	Roles    string       `json:"-"`              // 这个字段写入数据库
+	RolesLst []string     `json:"roles" gorm:"-"` // 这个字段和前端交互
+	Contacts ormx.JSONObj `json:"contacts"`       // 内容为 map[string]string 结构
+	CreateAt int64        `json:"create_at"`
+	CreateBy string       `json:"create_by"`
+	UpdateAt int64        `json:"update_at"`
+	UpdateBy string       `json:"update_by"`
+	Admin    bool         `json:"admin" gorm:"-"` // 方便前端使用
 }
 
-func (u *User) Validate() error {
+func (u *User) TableName() string {
+	return "user"
+}
+
+func (u *User) IsAdmin() bool {
+	for i := 0; i < len(u.RolesLst); i++ {
+		if u.RolesLst[i] == config.C.AdminRole {
+			return true
+		}
+	}
+	return false
+}
+
+func (u *User) Verify() error {
 	u.Username = strings.TrimSpace(u.Username)
+
 	if u.Username == "" {
-		return _e("username is blank")
+		return errors.New("Username is blank")
 	}
 
 	if str.Dangerous(u.Username) {
-		return _e("%s %s format error", _s("username"), u.Username)
+		return errors.New("Username has invalid characters")
 	}
 
-	if str.Dangerous(u.Dispname) {
-		return _e("%s %s format error", _s("dispname"), u.Dispname)
+	if str.Dangerous(u.Nickname) {
+		return errors.New("Nickname has invalid characters")
 	}
 
 	if u.Phone != "" && !str.IsPhone(u.Phone) {
-		return _e("%s %s format error", _s("phone"), u.Phone)
+		return errors.New("Phone invalid")
 	}
 
 	if u.Email != "" && !str.IsMail(u.Email) {
-		return _e("%s %s format error", _s("email"), u.Email)
+		return errors.New("Email invalid")
 	}
 
-	if len(u.Username) > 32 {
-		return _e("username too long (max:%d)", 32)
-	}
-
-	if len(u.Dispname) > 32 {
-		return _e("dispname too long (max:%d)", 32)
-	}
-
-	if strings.ContainsAny(u.Im, "%'") {
-		return _e("%s %s format error", "im", u.Im)
-	}
-
-	cnt, _ := DB["rdb"].Where("((email <> '' and email=?) or (phone <> '' and phone=?)) and username=?",
-		u.Email, u.Phone, u.Username).Count(u)
-	if cnt > 0 {
-		return _e("email %s or phone %s is exists", u.Email, u.Phone)
-	}
 	return nil
 }
 
-func (u *User) CopyLdapAttr(sr *ldap.SearchResult) {
-	attrs := LDAPConfig.Attributes
-	if attrs.Dispname != "" {
-		u.Dispname = sr.Entries[0].GetAttributeValue(attrs.Dispname)
+func (u *User) Add() error {
+	user, err := UserGetByUsername(u.Username)
+	if err != nil {
+		return errors.WithMessage(err, "failed to query user")
 	}
-	if attrs.Email != "" {
-		u.Email = sr.Entries[0].GetAttributeValue(attrs.Email)
+
+	if user != nil {
+		return errors.New("Username already exists")
 	}
-	if attrs.Phone != "" {
-		u.Phone = sr.Entries[0].GetAttributeValue(attrs.Phone)
-	}
-	if attrs.Im != "" {
-		u.Im = sr.Entries[0].GetAttributeValue(attrs.Im)
-	}
+
+	now := time.Now().Unix()
+	u.CreateAt = now
+	u.UpdateAt = now
+	return Insert(u)
 }
 
-func InitRooter() {
-	var u User
-	has, err := DB["rdb"].Where("username=?", "root").Get(&u)
-	if err != nil {
-		log.Fatalln("cannot query user[root]", err)
+func (u *User) UpdateAllFields() error {
+	if err := u.Verify(); err != nil {
+		return err
 	}
 
-	if has {
+	u.UpdateAt = time.Now().Unix()
+	return DB().Model(u).Select("*").Updates(u).Error
+}
+
+func (u *User) UpdatePassword(password, updateBy string) error {
+	return DB().Model(u).Updates(map[string]interface{}{
+		"password":  password,
+		"update_at": time.Now().Unix(),
+		"update_by": updateBy,
+	}).Error
+}
+
+func (u *User) Del() error {
+	return DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id=?", u.Id).Delete(&UserGroupMember{}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("id=?", u.Id).Delete(&User{}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func (u *User) ChangePassword(oldpass, newpass string) error {
+	_oldpass, err := CryptoPass(oldpass)
+	if err != nil {
+		return err
+	}
+
+	_newpass, err := CryptoPass(newpass)
+	if err != nil {
+		return err
+	}
+
+	if u.Password != _oldpass {
+		return errors.New("Incorrect old password")
+	}
+
+	return u.UpdatePassword(_newpass, u.Username)
+}
+
+func UserGet(where string, args ...interface{}) (*User, error) {
+	var lst []*User
+	err := DB().Where(where, args...).Find(&lst).Error
+	if err != nil {
+		return nil, err
+	}
+
+	if len(lst) == 0 {
+		return nil, nil
+	}
+
+	lst[0].RolesLst = strings.Fields(lst[0].Roles)
+	lst[0].Admin = lst[0].IsAdmin()
+
+	return lst[0], nil
+}
+
+func UserGetByUsername(username string) (*User, error) {
+	return UserGet("username=?", username)
+}
+
+func UserGetById(id int64) (*User, error) {
+	return UserGet("id=?", id)
+}
+
+func InitRoot() {
+	user, err := UserGetByUsername("root")
+	if err != nil {
+		fmt.Println("failed to query user root:", err)
+		os.Exit(1)
+	}
+
+	if user == nil {
 		return
 	}
 
-	pass, err := CryptoPass("root.2020")
+	if len(user.Password) > 31 {
+		// already done before
+		return
+	}
+
+	newPass, err := CryptoPass(user.Password)
 	if err != nil {
-		log.Fatalln(err)
+		fmt.Println("failed to crypto pass:", err)
+		os.Exit(1)
 	}
 
-	u = User{
-		Username: "root",
-		Password: pass,
-		Dispname: "超管",
-		IsRoot:   1,
-		UUID:     GenUUIDForUser("root"),
-	}
-
-	_, err = DB["rdb"].Insert(u)
+	err = DB().Model(user).Update("password", newPass).Error
 	if err != nil {
-		log.Fatalln("cannot insert user[root]")
+		fmt.Println("failed to update root password:", err)
+		os.Exit(1)
 	}
 
-	log.Println("user root init done")
-}
-
-func LdapLogin(username, pass string) (*User, error) {
-	sr, err := ldapReq(username, pass)
-	if err != nil {
-		return nil, err
-	}
-
-	var user User
-	has, err := DB["rdb"].Where("username=?", username).Get(&user)
-	if err != nil {
-		return nil, err
-	}
-
-	user.CopyLdapAttr(sr)
-
-	if has {
-		if LDAPConfig.CoverAttributes {
-			_, err := DB["rdb"].Where("id=?", user.Id).Update(user)
-			return &user, err
-		} else {
-			return &user, err
-		}
-	}
-
-	user.Username = username
-	user.Password = "******"
-	user.UUID = GenUUIDForUser(username)
-	_, err = DB["rdb"].Insert(user)
-	return &user, nil
+	fmt.Println("root password init done")
 }
 
 func PassLogin(username, pass string) (*User, error) {
-	var user User
-	has, err := DB["rdb"].Where("username=?", username).Get(&user)
+	user, err := UserGetByUsername(username)
 	if err != nil {
-		return nil, _e("Login fail, check your username and password")
+		return nil, err
 	}
 
-	if !has {
-		logger.Infof("password auth fail, no such user: %s", username)
-		return nil, _e("Login fail, check your username and password")
+	if user == nil {
+		return nil, fmt.Errorf("Username or password invalid")
 	}
 
 	loginPass, err := CryptoPass(pass)
 	if err != nil {
-		return &user, err
+		return nil, err
 	}
 
 	if loginPass != user.Password {
-		logger.Infof("password auth fail, password error, user: %s", username)
-		return &user, _e("Login fail, check your username and password")
+		return nil, fmt.Errorf("Username or password invalid")
 	}
-
-	return &user, nil
-}
-
-func SmsCodeLogin(phone, code string) (*User, error) {
-	user, _ := UserGet("phone=?", phone)
-	if user == nil {
-		return nil, fmt.Errorf("phone %s dose not exist", phone)
-	}
-
-	lc, err := LoginCodeGet("username=? and code=? and login_type=?", user.Username, code, LOGIN_T_LOGIN)
-	if err != nil {
-		logger.Debugf("sms-code auth fail, user: %s", user.Username)
-		return user, _e("The code is incorrect")
-	}
-
-	if time.Now().Unix()-lc.CreatedAt > LOGIN_EXPIRES_IN {
-		logger.Debugf("sms-code auth expired, user: %s", user.Username)
-		return user, _e("The code has expired")
-	}
-
-	lc.Del()
 
 	return user, nil
 }
 
-func EmailCodeLogin(email, code string) (*User, error) {
-	user, _ := UserGet("email=?", email)
+func LdapLogin(username, pass string) (*User, error) {
+	sr, err := ldapx.LdapReq(username, pass)
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := UserGetByUsername(username)
+	if err != nil {
+		return nil, err
+	}
+
 	if user == nil {
-		return nil, fmt.Errorf("email %s dose not exist", email)
+		// default user settings
+		user = &User{
+			Username: username,
+			Nickname: username,
+		}
 	}
 
-	lc, err := LoginCodeGet("username=? and code=? and login_type=?", user.Username, code, LOGIN_T_LOGIN)
+	// copy attributes from ldap
+	attrs := ldapx.LDAP.Attributes
+	if attrs.Nickname != "" {
+		user.Nickname = sr.Entries[0].GetAttributeValue(attrs.Nickname)
+	}
+	if attrs.Email != "" {
+		user.Email = sr.Entries[0].GetAttributeValue(attrs.Email)
+	}
+	if attrs.Phone != "" {
+		user.Phone = sr.Entries[0].GetAttributeValue(attrs.Phone)
+	}
+
+	if user.Id > 0 {
+		if ldapx.LDAP.CoverAttributes {
+			err := DB().Updates(user).Error
+			if err != nil {
+				return nil, errors.WithMessage(err, "failed to update user")
+			}
+		}
+		return user, nil
+	}
+
+	now := time.Now().Unix()
+
+	if len(config.C.LDAP.DefaultRoles) == 0 {
+		config.C.LDAP.DefaultRoles = []string{"Standard"}
+	}
+
+	user.Password = "******"
+	user.Portrait = ""
+	user.Roles = strings.Join(config.C.LDAP.DefaultRoles, " ")
+	user.RolesLst = config.C.LDAP.DefaultRoles
+	user.Contacts = []byte("{}")
+	user.CreateAt = now
+	user.UpdateAt = now
+	user.CreateBy = "ldap"
+	user.UpdateBy = "ldap"
+
+	err = DB().Create(user).Error
+	return user, err
+}
+
+func UserTotal(query string) (num int64, err error) {
+	if query != "" {
+		q := "%" + query + "%"
+		num, err = Count(DB().Model(&User{}).Where("username like ? or nickname like ? or phone like ? or email like ?", q, q, q, q))
+	} else {
+		num, err = Count(DB().Model(&User{}))
+	}
+
 	if err != nil {
-		logger.Debugf("email-code auth fail, user: %s", user.Username)
-		return user, _e("The code is incorrect")
+		return num, errors.WithMessage(err, "failed to count user")
 	}
 
-	if time.Now().Unix()-lc.CreatedAt > LOGIN_EXPIRES_IN {
-		logger.Debugf("email-code auth expired, user: %s", user.Username)
-		return user, _e("The code has expired")
-	}
-
-	lc.Del()
-
-	return user, nil
+	return num, nil
 }
 
-func UserGet(where string, args ...interface{}) (*User, error) {
-	var obj User
-	has, err := DB["rdb"].Where(where, args...).Get(&obj)
+func UserGets(query string, limit, offset int) ([]User, error) {
+	session := DB().Limit(limit).Offset(offset).Order("username")
+	if query != "" {
+		q := "%" + query + "%"
+		session = session.Where("username like ? or nickname like ? or phone like ? or email like ?", q, q, q, q)
+	}
+
+	var users []User
+	err := session.Find(&users).Error
 	if err != nil {
-		return nil, err
+		return users, errors.WithMessage(err, "failed to query user")
 	}
 
-	if !has {
-		return nil, nil
+	for i := 0; i < len(users); i++ {
+		users[i].RolesLst = strings.Fields(users[i].Roles)
+		users[i].Admin = users[i].IsAdmin()
 	}
 
-	return &obj, nil
+	return users, nil
 }
 
-func UserMustGet(where string, args ...interface{}) (*User, error) {
-	var obj User
-	has, err := DB["rdb"].Where(where, args...).Get(&obj)
-	if err != nil {
-		return nil, err
+func UserGetAll() ([]*User, error) {
+	var lst []*User
+	err := DB().Find(&lst).Error
+	if err == nil {
+		for i := 0; i < len(lst); i++ {
+			lst[i].RolesLst = strings.Fields(lst[i].Roles)
+			lst[i].Admin = lst[i].IsAdmin()
+		}
 	}
-
-	if !has {
-		return nil, _e("User dose not exist")
-	}
-
-	return &obj, nil
-}
-
-func (u *User) IsRooter() bool {
-	return u.IsRoot == 1
-}
-
-func (u *User) Update(cols ...string) error {
-	if err := u.Validate(); err != nil {
-		return err
-	}
-
-	_, err := DB["rdb"].Where("id=?", u.Id).Cols(cols...).Update(u)
-	return err
-}
-
-func (u *User) Save() error {
-	if err := u.Validate(); err != nil {
-		return err
-	}
-
-	if u.Id > 0 {
-		return _e("user.id[%d] not equal 0", u.Id)
-	}
-
-	if u.UUID == "" {
-		u.UUID = GenUUIDForUser(u.Username)
-	}
-
-	cnt, err := DB["rdb"].Where("username=?", u.Username).Count(new(User))
-	if err != nil {
-		return err
-	}
-
-	if cnt > 0 {
-		return _e("Username %s already exists", u.Username)
-	}
-
-	u.UpdatedAt = time.Now().Unix()
-
-	_, err = DB["rdb"].Insert(u)
-	return err
-}
-
-func UserTotal(ids []int64, where string, args ...interface{}) (int64, error) {
-	session := DB["rdb"].NewSession()
-	defer session.Close()
-
-	if len(ids) > 0 {
-		session = session.In("id", ids)
-	}
-
-	if where != "" {
-		session = session.Where(where, args...)
-	}
-
-	return session.Count(new(User))
+	return lst, err
 }
 
 func UserGetsByIds(ids []int64) ([]User, error) {
-	var users []User
-	err := DB["rdb"].In("id", ids).Find(&users)
-	return users, err
+	if len(ids) == 0 {
+		return []User{}, nil
+	}
+
+	var lst []User
+	err := DB().Where("id in ?", ids).Order("username").Find(&lst).Error
+	if err == nil {
+		for i := 0; i < len(lst); i++ {
+			lst[i].RolesLst = strings.Fields(lst[i].Roles)
+			lst[i].Admin = lst[i].IsAdmin()
+		}
+	}
+
+	return lst, err
 }
 
-func UserGets(ids []int64, limit, offset int, where string, args ...interface{}) ([]User, error) {
-	session := DB["rdb"].Limit(limit, offset).OrderBy("username")
+func (u *User) CanModifyUserGroup(ug *UserGroup) (bool, error) {
+	// 我是管理员，自然可以
+	if u.IsAdmin() {
+		return true, nil
+	}
+
+	// 我是创建者，自然可以
+	if ug.CreateBy == u.Username {
+		return true, nil
+	}
+
+	// 我是成员，也可以吧，简单搞
+	num, err := UserGroupMemberCount("user_id=? and group_id=?", u.Id, ug.Id)
+	if err != nil {
+		return false, err
+	}
+
+	return num > 0, nil
+}
+
+func (u *User) CanDoBusiGroup(bg *BusiGroup, permFlag ...string) (bool, error) {
+	if u.IsAdmin() {
+		return true, nil
+	}
+
+	// 我在任意一个UserGroup里，就有权限
+	ugids, err := UserGroupIdsOfBusiGroup(bg.Id, permFlag...)
+	if err != nil {
+		return false, err
+	}
+
+	if len(ugids) == 0 {
+		return false, nil
+	}
+
+	num, err := UserGroupMemberCount("user_id = ? and group_id in ?", u.Id, ugids)
+	return num > 0, err
+}
+
+func (u *User) CheckPerm(operation string) (bool, error) {
+	if u.IsAdmin() {
+		return true, nil
+	}
+
+	return RoleHasOperation(u.RolesLst, operation)
+}
+
+func UserStatistics() (*Statistics, error) {
+	session := DB().Model(&User{}).Select("count(*) as total", "max(update_at) as last_updated")
+
+	var stats []*Statistics
+	err := session.Find(&stats).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return stats[0], nil
+}
+
+func (u *User) NopriIdents(idents []string) ([]string, error) {
+	if u.IsAdmin() {
+		return []string{}, nil
+	}
+
+	ugids, err := MyGroupIds(u.Id)
+	if err != nil {
+		return []string{}, err
+	}
+
+	if len(ugids) == 0 {
+		return idents, nil
+	}
+
+	bgids, err := BusiGroupIds(ugids, "rw")
+	if err != nil {
+		return []string{}, err
+	}
+
+	if len(bgids) == 0 {
+		return idents, nil
+	}
+
+	var arr []string
+	err = DB().Model(&Target{}).Where("group_id in ?", bgids).Pluck("ident", &arr).Error
+	if err != nil {
+		return []string{}, err
+	}
+
+	return slice.SubString(idents, arr), nil
+}
+
+// 我是管理员，返回所有
+// 或者我是成员
+func (u *User) BusiGroups(limit int, query string, all ...bool) ([]BusiGroup, error) {
+	session := DB().Order("name").Limit(limit)
+
+	var lst []BusiGroup
+	if u.IsAdmin() || (len(all) > 0 && all[0]) {
+		err := session.Where("name like ?", "%"+query+"%").Find(&lst).Error
+		return lst, err
+	}
+
+	userGroupIds, err := MyGroupIds(u.Id)
+	if err != nil {
+		return nil, errors.WithMessage(err, "failed to get MyGroupIds")
+	}
+
+	busiGroupIds, err := BusiGroupIds(userGroupIds)
+	if err != nil {
+		return nil, errors.WithMessage(err, "failed to get BusiGroupIds")
+	}
+
+	if len(busiGroupIds) == 0 {
+		return lst, nil
+	}
+
+	err = session.Where("id in ?", busiGroupIds).Where("name like ?", "%"+query+"%").Find(&lst).Error
+	return lst, err
+}
+
+func (u *User) UserGroups(limit int, query string) ([]UserGroup, error) {
+	session := DB().Order("name").Limit(limit)
+
+	var lst []UserGroup
+	if u.IsAdmin() {
+		err := session.Where("name like ?", "%"+query+"%").Find(&lst).Error
+		return lst, err
+	}
+
+	ids, err := MyGroupIds(u.Id)
+	if err != nil {
+		return nil, errors.WithMessage(err, "failed to get MyGroupIds")
+	}
+
+	session = session.Where("create_by = ? and name like ?", u.Username, "%"+query+"%")
+
 	if len(ids) > 0 {
-		session = session.In("id", ids)
+		session = session.Or("id in ?", ids)
 	}
 
-	if where != "" {
-		session = session.Where(where, args...)
-	}
-
-	var users []User
-	err := session.Find(&users)
-	return users, err
-}
-
-func AllUsers() ([]User, error) {
-	var users []User
-	err := DB["rdb"].Find(&users)
-	return users, err
-}
-
-func (u *User) Del() error {
-	session := DB["rdb"].NewSession()
-	defer session.Close()
-
-	if err := session.Begin(); err != nil {
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM team_user WHERE user_id=?", u.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM role_global_user WHERE user_id=?", u.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM node_admin WHERE user_id=?", u.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM user_token WHERE user_id=?", u.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM user WHERE id=?", u.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	return session.Commit()
-}
-
-func (u *User) CanModifyTeam(t *Team) (bool, error) {
-	if u.IsRoot == 1 {
-		return true, nil
-	}
-
-	if u.Id == t.Creator {
-		return true, nil
-	}
-
-	session := DB["rdb"].Where("team_id=? and user_id=?", t.Id, u.Id)
-	if t.Mgmt == 1 {
-		session = session.Where("is_admin=1")
-	}
-
-	cnt, err := session.Count(new(TeamUser))
-	return cnt > 0, err
-}
-
-func (u *User) CheckPermByNode(node *Node, operation string) {
-	if node == nil {
-		errors.Bomb(_s("node is nil"))
-	}
-
-	if operation == "" {
-		errors.Bomb(_s("operation is blank"))
-	}
-
-	has, err := u.HasPermByNode(node, operation)
-	errors.Dangerous(err)
-
-	if !has {
-		errors.Bomb(_s("no privilege"))
-	}
-}
-
-func (u *User) HasPermByNode(node *Node, operation string) (bool, error) {
-	// 我是超管，自然有权限
-	if u.IsRoot == 1 {
-		return true, nil
-	}
-
-	// 我是path上游的某个admin，自然有权限
-	nodeIds, err := NodeIdsByPaths(Paths(node.Path))
-	if err != nil {
-		return false, err
-	}
-
-	if len(nodeIds) == 0 {
-		// 这个数据有问题，是个不正常的path
-		return false, nil
-	}
-
-	yes, err := NodesAdminExists(nodeIds, u.Id)
-	if err != nil {
-		return false, err
-	}
-
-	if yes {
-		return true, nil
-	}
-
-	// 都不是，当成普通用户校验
-	// 1. 查看哪些角色包含这个操作（权限点）
-	roleIds, err := RoleIdsHasOp(operation)
-	if err != nil {
-		return false, err
-	}
-
-	if len(roleIds) == 0 {
-		return false, nil
-	}
-
-	// 2. 用户在上游任一节点绑过任一角色？
-	yes, err = NodeRoleExists(nodeIds, roleIds, u.Username)
-	if err != nil {
-		return false, err
-	}
-
-	return yes, nil
-}
-
-func (u *User) CheckPermGlobal(operation string) {
-	has, err := u.HasPermGlobal(operation)
-	errors.Dangerous(err)
-
-	if !has {
-		errors.Bomb(_s("no privilege"))
-	}
-}
-
-func (u *User) HasPermGlobal(operation string) (bool, error) {
-	if u.IsRoot == 1 {
-		return true, nil
-	}
-
-	rids, err := RoleIdsHasOp(operation)
-	if err != nil {
-		return false, _e("[CheckPermGlobal] RoleIdsHasOp fail: %v, operation: %s", err, operation)
-	}
-
-	if rids == nil || len(rids) == 0 {
-		return false, nil
-	}
-
-	has, err := UserHasGlobalRole(u.Id, rids)
-	if err != nil {
-		return false, _e("[CheckPermGlobal] UserHasGlobalRole fail: %v, username: %s", err, u.Username)
-	}
-
-	return has, nil
-}
-
-func UserGetByIds(ids []int64) ([]User, error) {
-	if ids == nil || len(ids) == 0 {
-		return []User{}, nil
-	}
-
-	var objs []User
-	err := DB["rdb"].In("id", ids).OrderBy("username").Find(&objs)
-	return objs, err
-}
-
-func UserGetByNames(names []string) ([]User, error) {
-	if names == nil || len(names) == 0 {
-		return []User{}, nil
-	}
-
-	var objs []User
-	err := DB["rdb"].In("username", names).OrderBy("username").Find(&objs)
-	return objs, err
-}
-
-func UserGetByUUIDs(uuids []string) ([]User, error) {
-	if uuids == nil || len(uuids) == 0 {
-		return []User{}, nil
-	}
-
-	var objs []User
-	err := DB["rdb"].In("uuid", uuids).OrderBy("username").Find(&objs)
-	return objs, err
-}
-
-func UserSearchListInIds(ids []int64, query string, limit, offset int) ([]User, error) {
-	if ids == nil || len(ids) == 0 {
-		return []User{}, nil
-	}
-
-	session := DB["rdb"].In("id", ids)
-	if query != "" {
-		q := "%" + query + "%"
-		session = session.Where("username like ? or dispname like ?", q, q)
-	}
-
-	var objs []User
-	err := session.OrderBy("username").Limit(limit, offset).Find(&objs)
-	return objs, err
-}
-
-func UserSearchTotalInIds(ids []int64, query string) (int64, error) {
-	if ids == nil || len(ids) == 0 {
-		return 0, nil
-	}
-
-	session := DB["rdb"].In("id", ids)
-	if query != "" {
-		q := "%" + query + "%"
-		session = session.Where("username like ? or dispname like ?", q, q)
-	}
-
-	return session.Count(new(User))
-}
-
-func safeUserIds(ids []int64) ([]int64, error) {
-	cnt := len(ids)
-	ret := make([]int64, 0, cnt)
-	for i := 0; i < cnt; i++ {
-		user, err := UserGet("id=?", ids[i])
-		if err != nil {
-			return nil, err
-		}
-
-		if user != nil {
-			ret = append(ret, ids[i])
-		}
-	}
-	return ret, nil
-}
-
-// Deprecated
-func UsernameByUUID(uuid string) string {
-	logger.Warningf("UsernameByUUID is Deprectaed, use UsernameBySid instead of it")
-	if uuid == "" {
-		return ""
-	}
-
-	var username string
-	if err := cache.Get("user."+uuid, &username); err == nil {
-		return username
-	}
-
-	user, err := UserGet("uuid=?", uuid)
-	if err != nil {
-		logger.Errorf("UserGet(uuid=%s) fail:%v", uuid, err)
-		return ""
-	}
-
-	if user == nil {
-		return ""
-	}
-
-	cache.Set("user."+uuid, user.Username, time.Hour*24)
-
-	return user.Username
-}
-
-func UserFillUUIDs() error {
-	var users []User
-	err := DB["rdb"].Find(&users)
-	if err != nil {
-		return err
-	}
-
-	count := len(users)
-	for i := 0; i < count; i++ {
-		if users[i].UUID == "" {
-			users[i].UUID = GenUUIDForUser(users[i].Username)
-			err = users[i].Update("uuid")
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// PermResIds 我在某些节点是管理员，或者我在某些节点有此权限点，获取下面的叶子节点挂载的资源列表
-func (u *User) PermResIds(operation string) ([]int64, error) {
-	nids1, err := NodeIdsIamAdmin(u.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	nids2, err := NodeIdsBindingUsernameWithOp(u.Username, operation)
-	if err != nil {
-		return nil, err
-	}
-
-	nids := append(nids1, nids2...)
-
-	nodes, err := NodeByIds(nids)
-	if err != nil {
-		return nil, err
-	}
-
-	lids, err := LeafIdsByNodes(nodes)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(lids) == 0 {
-		return []int64{}, nil
-	}
-
-	return ResIdsGetByNodeIds(lids)
-}
-
-// NopriResIdents 我没有权限的资源ident列表
-func (u *User) NopriResIdents(resIds []int64, op string) ([]string, error) {
-	permIds, err := u.PermResIds(op)
-	if err != nil {
-		return nil, err
-	}
-
-	// 全量的 - 我有权限的 = 我没有权限的
-	nopris := slice.SubInt64(resIds, permIds)
-	return ResourceIdentsByIds(nopris)
-}
-
-func UsersGet(where string, args ...interface{}) ([]User, error) {
-	var objs []User
-	err := DB["rdb"].Where(where, args...).Find(&objs)
-	if err != nil {
-		return nil, err
-	}
-
-	return objs, nil
-}
-
-func (u *User) PermByNode(node *Node, localOpsList []string) ([]string, error) {
-	// 我是超管，自然有权限
-	if u.IsRoot == 1 {
-		return localOpsList, nil
-	}
-
-	// 我是path上游的某个admin，自然有权限
-	nodeIds, err := NodeIdsByPaths(Paths(node.Path))
-	if err != nil {
-		return nil, err
-	}
-
-	if len(nodeIds) == 0 {
-		return nil, nil
-	}
-
-	if yes, err := NodesAdminExists(nodeIds, u.Id); err != nil {
-		return nil, err
-	} else if yes {
-		return localOpsList, nil
-	}
-
-	if roleIds, err := RoleIdsBindingUsername(u.Username, nodeIds); err != nil {
-		return nil, err
-	} else {
-		return OperationsOfRoles(roleIds)
-	}
+	err = session.Find(&lst).Error
+	return lst, err
 }

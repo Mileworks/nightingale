@@ -1,90 +1,103 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/toolkits/pkg/slice"
 	"github.com/toolkits/pkg/str"
+	"gorm.io/gorm"
 )
 
 type TaskTpl struct {
-	Id          int64     `json:"id"`
-	NodeId      int64     `json:"node_id"`
-	Title       string    `json:"title"`
-	Batch       int       `json:"batch"`
-	Tolerance   int       `json:"tolerance"`
-	Timeout     int       `json:"timeout"`
-	Pause       string    `json:"pause"`
-	Script      string    `json:"script"`
-	Args        string    `json:"args"`
-	Tags        string    `json:"tags"`
-	Account     string    `json:"account"`
-	Creator     string    `json:"creator"`
-	LastUpdated time.Time `xorm:"<-" json:"last_updated"`
+	Id        int64    `json:"id" gorm:"primaryKey"`
+	GroupId   int64    `json:"group_id"`
+	Title     string   `json:"title"`
+	Batch     int      `json:"batch"`
+	Tolerance int      `json:"tolerance"`
+	Timeout   int      `json:"timeout"`
+	Pause     string   `json:"pause"`
+	Script    string   `json:"script"`
+	Args      string   `json:"args"`
+	Tags      string   `json:"-"`
+	TagsJSON  []string `json:"tags" gorm:"-"`
+	Account   string   `json:"account"`
+	CreateAt  int64    `json:"create_at"`
+	CreateBy  string   `json:"create_by"`
+	UpdateAt  int64    `json:"update_at"`
+	UpdateBy  string   `json:"update_by"`
 }
 
-func TaskTplTotal(nodeId int64, query string) (int64, error) {
-	session := DB["job"].Where("node_id = ?", nodeId)
+func (t *TaskTpl) TableName() string {
+	return "task_tpl"
+}
+
+func TaskTplTotal(groupId int64, query string) (int64, error) {
+	session := DB().Model(&TaskTpl{}).Where("group_id = ?", groupId)
 	if query == "" {
-		return session.Count(new(TaskTpl))
+		return Count(session)
 	}
 
 	arr := strings.Fields(query)
 	for i := 0; i < len(arr); i++ {
 		arg := "%" + arr[i] + "%"
-		session = session.And("title like ? or tags like ?", arg, arg)
+		session = session.Where("title like ? or tags like ?", arg, arg)
 	}
 
-	return session.Count(new(TaskTpl))
+	return Count(session)
 }
 
-func TaskTplGets(nodeId int64, query string, limit, offset int) ([]TaskTpl, error) {
-	session := DB["job"].Where("node_id = ?", nodeId).OrderBy("title").Limit(limit, offset)
+func TaskTplGets(groupId int64, query string, limit, offset int) ([]TaskTpl, error) {
+	session := DB().Where("group_id = ?", groupId).Order("title").Limit(limit).Offset(offset)
 
 	var tpls []TaskTpl
-	if query == "" {
-		err := session.Find(&tpls)
-		return tpls, err
+	if query != "" {
+		arr := strings.Fields(query)
+		for i := 0; i < len(arr); i++ {
+			arg := "%" + arr[i] + "%"
+			session = session.Where("title like ? or tags like ?", arg, arg)
+		}
 	}
 
-	arr := strings.Fields(query)
-	for i := 0; i < len(arr); i++ {
-		arg := "%" + arr[i] + "%"
-		session = session.And("title like ? or tags like ?", arg, arg)
+	err := session.Find(&tpls).Error
+	if err == nil {
+		for i := 0; i < len(tpls); i++ {
+			tpls[i].TagsJSON = strings.Fields(tpls[i].Tags)
+		}
 	}
 
-	err := session.Find(&tpls)
 	return tpls, err
 }
 
 func TaskTplGet(where string, args ...interface{}) (*TaskTpl, error) {
-	var obj TaskTpl
-	has, err := DB["job"].Where(where, args...).Get(&obj)
+	var arr []*TaskTpl
+	err := DB().Where(where, args...).Find(&arr).Error
 	if err != nil {
 		return nil, err
 	}
 
-	if !has {
+	if len(arr) == 0 {
 		return nil, nil
 	}
 
-	return &obj, nil
+	arr[0].TagsJSON = strings.Fields(arr[0].Tags)
+
+	return arr[0], nil
 }
 
 func (t *TaskTpl) CleanFields() error {
 	if t.Batch < 0 {
-		return fmt.Errorf("arg[batch] should be nonnegative")
+		return errors.New("arg(batch) should be nonnegative")
 	}
 
 	if t.Tolerance < 0 {
-		return fmt.Errorf("arg[tolerance] should be nonnegative")
+		return errors.New("arg(tolerance) should be nonnegative")
 	}
 
 	if t.Timeout < 0 {
-		return fmt.Errorf("arg[timeout] should be nonnegative")
+		return errors.New("arg(timeout) should be nonnegative")
 	}
 
 	if t.Timeout == 0 {
@@ -92,37 +105,36 @@ func (t *TaskTpl) CleanFields() error {
 	}
 
 	if t.Timeout > 3600*24 {
-		return fmt.Errorf("arg[timeout] longer than one day")
+		return errors.New("arg(timeout) longer than one day")
 	}
 
 	t.Pause = strings.Replace(t.Pause, "，", ",", -1)
 	t.Pause = strings.Replace(t.Pause, " ", "", -1)
 	t.Args = strings.Replace(t.Args, "，", ",", -1)
 	t.Tags = strings.Replace(t.Tags, "，", ",", -1)
-	t.Tags = strings.Replace(t.Tags, " ", "", -1)
 
 	if t.Title == "" {
-		return fmt.Errorf("arg[title] is blank")
+		return errors.New("arg(title) is required")
 	}
 
 	if str.Dangerous(t.Title) {
-		return fmt.Errorf("arg[title] is dangerous")
+		return errors.New("arg(title) is dangerous")
 	}
 
 	if t.Script == "" {
-		return fmt.Errorf("arg[script] is blank")
+		return errors.New("arg(script) is required")
 	}
 
 	if str.Dangerous(t.Args) {
-		return fmt.Errorf("arg[args] is dangerous")
+		return errors.New("arg(args) is dangerous")
 	}
 
 	if str.Dangerous(t.Pause) {
-		return fmt.Errorf("arg[pause] is dangerous")
+		return errors.New("arg(pause) is dangerous")
 	}
 
 	if str.Dangerous(t.Tags) {
-		return fmt.Errorf("arg[tags] is dangerous")
+		return errors.New("arg(tags) is dangerous")
 	}
 
 	return nil
@@ -133,45 +145,43 @@ func (t *TaskTpl) Save(hosts []string) error {
 		return err
 	}
 
-	session := DB["job"].NewSession()
-	defer session.Close()
-
-	cnt, err := session.Where("node_id=? and title=?", t.NodeId, t.Title).Count(new(TaskTpl))
+	cnt, err := Count(DB().Model(&TaskTpl{}).Where("group_id=? and title=?", t.GroupId, t.Title))
 	if err != nil {
 		return err
 	}
 
 	if cnt > 0 {
-		return fmt.Errorf("title[%s] already exists", t.Title)
+		return fmt.Errorf("task template already exists")
 	}
 
-	if err = session.Begin(); err != nil {
-		return err
-	}
-
-	if _, err = session.Insert(t); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	for i := 0; i < len(hosts); i++ {
-		host := strings.TrimSpace(hosts[i])
-		if host == "" {
-			continue
-		}
-
-		if _, err = session.Exec("INSERT INTO task_tpl_host(id, host) VALUES(?, ?)", t.Id, host); err != nil {
-			session.Rollback()
+	return DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(t).Error; err != nil {
 			return err
 		}
-	}
 
-	return session.Commit()
+		for i := 0; i < len(hosts); i++ {
+			host := strings.TrimSpace(hosts[i])
+			if host == "" {
+				continue
+			}
+
+			err := tx.Table("task_tpl_host").Create(map[string]interface{}{
+				"id":   t.Id,
+				"host": host,
+			}).Error
+
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func (t *TaskTpl) Hosts() ([]string, error) {
 	var arr []string
-	err := DB["job"].Table("task_tpl_host").Where("id=?", t.Id).Select("host").OrderBy("ii").Find(&arr)
+	err := DB().Table("task_tpl_host").Where("id=?", t.Id).Order("ii").Pluck("host", &arr).Error
 	return arr, err
 }
 
@@ -180,97 +190,105 @@ func (t *TaskTpl) Update(hosts []string) error {
 		return err
 	}
 
-	session := DB["job"].NewSession()
-	defer session.Close()
-
-	cnt, err := session.Where("node_id=? and title=? and id <> ?", t.NodeId, t.Title, t.Id).Count(new(TaskTpl))
+	cnt, err := Count(DB().Model(&TaskTpl{}).Where("group_id=? and title=? and id <> ?", t.GroupId, t.Title, t.Id))
 	if err != nil {
 		return err
 	}
 
 	if cnt > 0 {
-		return fmt.Errorf("title[%s] already exists", t.Title)
+		return fmt.Errorf("task template already exists")
 	}
 
-	if err = session.Begin(); err != nil {
-		return err
-	}
+	return DB().Transaction(func(tx *gorm.DB) error {
+		err := tx.Model(t).Updates(map[string]interface{}{
+			"title":     t.Title,
+			"batch":     t.Batch,
+			"tolerance": t.Tolerance,
+			"timeout":   t.Timeout,
+			"pause":     t.Pause,
+			"script":    t.Script,
+			"args":      t.Args,
+			"tags":      t.Tags,
+			"account":   t.Account,
+			"update_by": t.UpdateBy,
+			"update_at": t.UpdateAt,
+		}).Error
 
-	if _, err = session.Where("id=?", t.Id).Cols("title", "batch", "tolerance", "timeout", "pause", "script", "args", "tags", "account").Update(t); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err = session.Exec("DELETE FROM task_tpl_host WHERE id=?", t.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	for i := 0; i < len(hosts); i++ {
-		host := strings.TrimSpace(hosts[i])
-		if host == "" {
-			continue
-		}
-
-		if _, err = session.Exec("INSERT INTO task_tpl_host(id, host) VALUES(?, ?)", t.Id, host); err != nil {
-			session.Rollback()
+		if err != nil {
 			return err
 		}
-	}
 
-	return session.Commit()
+		if err = tx.Exec("DELETE FROM task_tpl_host WHERE id = ?", t.Id).Error; err != nil {
+			return err
+		}
+
+		for i := 0; i < len(hosts); i++ {
+			host := strings.TrimSpace(hosts[i])
+			if host == "" {
+				continue
+			}
+
+			err := tx.Table("task_tpl_host").Create(map[string]interface{}{
+				"id":   t.Id,
+				"host": host,
+			}).Error
+
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func (t *TaskTpl) Del() error {
-	session := DB["job"].NewSession()
-	defer session.Close()
+	return DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("DELETE FROM task_tpl_host WHERE id=?", t.Id).Error; err != nil {
+			return err
+		}
 
-	if err := session.Begin(); err != nil {
-		return err
-	}
+		if err := tx.Delete(t).Error; err != nil {
+			return err
+		}
 
-	if _, err := session.Exec("DELETE FROM task_tpl_host WHERE id=?", t.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	if _, err := session.Exec("DELETE FROM task_tpl WHERE id=?", t.Id); err != nil {
-		session.Rollback()
-		return err
-	}
-
-	return session.Commit()
-}
-
-func (t *TaskTpl) BindTags(tags []string) error {
-	if t.Tags == "" {
-		t.Tags = strings.Join(tags, ",")
-	} else {
-		arr := strings.Split(t.Tags, ",")
-		lst := slice.UniqueString(append(arr, tags...))
-		sort.Strings(lst)
-		t.Tags = strings.Join(lst, ",")
-	}
-
-	_, err := DB["job"].Where("id=?", t.Id).Cols("tags").Update(t)
-	return err
-}
-
-func (t *TaskTpl) UnbindTags(tags []string) error {
-	if t.Tags == "" {
 		return nil
-	}
-
-	arr := strings.Split(t.Tags, ",")
-	lst := slice.SubString(arr, tags)
-	sort.Strings(lst)
-	t.Tags = strings.Join(lst, ",")
-	_, err := DB["job"].Where("id=?", t.Id).Cols("tags").Update(t)
-	return err
+	})
 }
 
-func (t *TaskTpl) UpdateGroup(nodeId int64) error {
-	t.NodeId = nodeId
-	_, err := DB["job"].Where("id=?", t.Id).Cols("node_id").Update(t)
-	return err
+func (t *TaskTpl) AddTags(tags []string, updateBy string) error {
+	for i := 0; i < len(tags); i++ {
+		if -1 == strings.Index(t.Tags, tags[i]+" ") {
+			t.Tags += tags[i] + " "
+		}
+	}
+
+	arr := strings.Fields(t.Tags)
+	sort.Strings(arr)
+
+	return DB().Model(t).Updates(map[string]interface{}{
+		"tags":      strings.Join(arr, " ") + " ",
+		"update_by": updateBy,
+		"update_at": time.Now().Unix(),
+	}).Error
+}
+
+func (t *TaskTpl) DelTags(tags []string, updateBy string) error {
+	for i := 0; i < len(tags); i++ {
+		t.Tags = strings.ReplaceAll(t.Tags, tags[i]+" ", "")
+	}
+
+	return DB().Model(t).Updates(map[string]interface{}{
+		"tags":      t.Tags,
+		"update_by": updateBy,
+		"update_at": time.Now().Unix(),
+	}).Error
+}
+
+func (t *TaskTpl) UpdateGroup(groupId int64, updateBy string) error {
+	return DB().Model(t).Updates(map[string]interface{}{
+		"group_id":  groupId,
+		"update_by": updateBy,
+		"update_at": time.Now().Unix(),
+	}).Error
 }
